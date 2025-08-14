@@ -249,24 +249,21 @@ function transformPoolsToTags(chainId: string, pools: Pool[]): ContractTag[] {
     // Build abbreviated, type-specific params
     const paramsSnippet = buildParamsSnippet(pool);
 
-    // Compose name with elegant 50-char cap enforcement
+    // Compose name as just '<Type> Pool v<version>' per request, keep 50-char cap safeguard
     const versionText = typeof pool.factory.version === "number" ? ` v${pool.factory.version}` : "";
     const baseName = `${typeText} Pool${versionText}`;
-    let nameTag = baseName;
-    if (paramsSnippet && paramsSnippet.trim().length > 0) {
-      const withParams = `${baseName} (${paramsSnippet})`;
-      // Prefer including params only if the full name fits within 50 chars
-      nameTag = withParams.length <= 50 ? withParams : baseName;
-    }
-    // Final safeguard: truncate if still over 50 (should rarely trigger)
-    nameTag = truncateString(nameTag, 50);
+    let nameTag = truncateString(baseName, 50);
+
+    // Move all parameter details to Public Note for richer context
+    const paramsNote = paramsSnippet && paramsSnippet.trim().length > 0 ? ` Params: ${paramsSnippet}.` : "";
+    const publicNote = `A Balancer v3 '${typeText}' pool.${paramsNote}`;
 
     return {
       "Contract Address": `eip155:${chainId}:${pool.address}`,
       "Public Name Tag": nameTag,
       "Project Name": "Balancer v3",
       "UI/Website Link": "https://balancer.fi",
-      "Public Note": `A Balancer v3 '${typeText}' pool.`,
+      "Public Note": publicNote,
     };
   });
 }
