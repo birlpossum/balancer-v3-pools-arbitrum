@@ -258,6 +258,7 @@ function transformPoolsToTags(chainId: string, pools: Pool[]): ContractTag[] {
     const paramsNote = paramsSnippet && paramsSnippet.trim().length > 0 ? ` Params: ${paramsSnippet}.` : "";
     const publicNote = `A Balancer v3 '${typeText}' pool.${paramsNote}`;
 
+    // Note that Balancer v3 does not expose tokens on Pool, so these are not included in the name tag.
     return {
       "Contract Address": `eip155:${chainId}:${pool.address}`,
       "Public Name Tag": nameTag,
