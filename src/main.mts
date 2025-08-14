@@ -2,12 +2,16 @@ import fetch from "node-fetch";
 import { ContractTag, ITagService } from "atq-types";
 
 // Balancer v3 Pools on Arbitrum only (chainId 42161)
-// Using the provided decentralized Subgraph Deployment ID.
+// Using the official decentralized Subgraph Deployment IDs.
 // Note: We keep the gateway format that requires an API key, replacing [api-key] at runtime.
-const SUBGRAPH_URLS: Record<string, { decentralized: string }> = {
+const SUBGRAPH_URLS: Record<string, { pools: string; vaults: string }> = {
   "42161": {
-    decentralized:
+    // Existing pools subgraph (no names on Pool entity)
+    pools:
       "https://gateway-arbitrum.network.thegraph.com/api/[api-key]/deployments/id/QmbxeZen77LdqpPeWU2AxdnXfXygw33jGgByWWoa2sZnPY",
+    // Vaults subgraph (contains Pool name/symbol/address we need)
+    vaults:
+      "https://gateway-arbitrum.network.thegraph.com/api/[api-key]/deployments/id/QmWYjRi4vSRZnf6wEAzYPvCYyS6rh4JnEbuYEDKHwKEuJw",
   },
 };
 
@@ -16,6 +20,61 @@ const SUBGRAPH_URLS: Record<string, { decentralized: string }> = {
 interface FactoryInfo {
   type: string; // PoolType enum as string
   version: number;
+}
+
+// Fetch all pool names from the Vaults subgraph and return a lookup by lowercase address
+async function fetchPoolNamesMap(subgraphUrl: string): Promise<Map<string, { name: string; symbol: string }>> {
+  const names = new Map<string, { name: string; symbol: string }>();
+  let lastId = "0x0000000000000000000000000000000000000000";
+  let isMore = true;
+
+  while (isMore) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30_000);
+    let response: any;
+    try {
+      response = await fetch(subgraphUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          query: GET_VAULTS_POOL_NAMES_QUERY,
+          variables: { lastId },
+        }),
+        signal: controller.signal,
+      } as any);
+    } catch (e: any) {
+      clearTimeout(timeout);
+      if (e?.name === "AbortError") {
+        throw new Error("Request timed out while querying the vaults subgraph.");
+      }
+      throw e;
+    } finally {
+      clearTimeout(timeout);
+    }
+    if (!response.ok) {
+      throw new Error(`HTTP error (vaults): ${response.status}`);
+    }
+    const result = (await response.json()) as VaultsGraphQLResponse;
+    if (result.errors) {
+      result.errors.forEach((error) => console.error(`GraphQL error (vaults): ${error.message}`));
+      throw new Error("GraphQL error from vaults subgraph.");
+    }
+    const page = result.data?.pools ?? [];
+    for (const p of page) {
+      if (p?.address && p?.name) {
+        names.set(String(p.address).toLowerCase(), { name: p.name, symbol: p.symbol });
+      }
+    }
+    isMore = page.length === 1000;
+    if (isMore) {
+      const nextLastId = page[page.length - 1].id;
+      if (!nextLastId || nextLastId === lastId) {
+        throw new Error("Pagination cursor (vaults) did not advance; aborting.");
+      }
+      lastId = nextLastId;
+    }
+  }
+  return names;
 }
 
 // Optional param shapes for constructing richer name tags
@@ -73,6 +132,39 @@ const GET_POOLS_QUERY = `
       lbpParams { owner projectToken reserveToken }
       quantAMMWeightedParams { epsilonMax maxTradeSizeRatio }
       reClammParams { lastTimestamp }
+    }
+  }
+`;
+
+// Minimal type and query to fetch Pool names from the Vaults subgraph
+interface VaultsPoolNameInfo {
+  id: string;
+  address: string;
+  name: string;
+  symbol: string;
+}
+
+interface VaultsGraphQLData {
+  pools: VaultsPoolNameInfo[];
+}
+
+interface VaultsGraphQLResponse {
+  data?: VaultsGraphQLData;
+  errors?: { message: string }[];
+}
+
+const GET_VAULTS_POOL_NAMES_QUERY = `
+  query GetVaultsPools($lastId: ID) {
+    pools(
+      first: 1000,
+      orderBy: id,
+      orderDirection: asc,
+      where: { id_gt: $lastId }
+    ) {
+      id
+      address
+      name
+      symbol
     }
   }
 `;
@@ -140,7 +232,8 @@ function prepareUrl(chainId: string, apiKey: string): string {
   if (!urls) {
     throw new Error(`Unsupported Chain ID: ${chainId}.`);
   }
-  return urls.decentralized.replace("[api-key]", encodeURIComponent(apiKey));
+  // Maintain function for backward-compatibility; returns the Pools subgraph URL
+  return urls.pools.replace("[api-key]", encodeURIComponent(apiKey));
 }
 
 function truncateString(text: string, maxLength: number) {
@@ -223,7 +316,11 @@ function buildParamsSnippet(pool: Pool): string {
 }
 
 // Local helper function used by returnTags
-function transformPoolsToTags(chainId: string, pools: Pool[]): ContractTag[] {
+function transformPoolsToTags(
+  chainId: string,
+  pools: Pool[],
+  namesMap?: Map<string, { name: string; symbol: string }>
+): ContractTag[] {
   const validPools: Pool[] = [];
 
   pools.forEach((pool) => {
@@ -249,10 +346,15 @@ function transformPoolsToTags(chainId: string, pools: Pool[]): ContractTag[] {
     // Build abbreviated, type-specific params
     const paramsSnippet = buildParamsSnippet(pool);
 
-    // Compose name as just '<Type> Pool v<version>' per request, keep 50-char cap safeguard
+    // Compose name as '<Type> Pool v<version>' and append Pool name from Vaults subgraph if available
     const versionText = typeof pool.factory.version === "number" ? ` v${pool.factory.version}` : "";
-    const baseName = `${typeText} Pool${versionText}`;
-    let nameTag = truncateString(baseName, 50);
+    let baseName = `${typeText} Pool${versionText}`;
+    const poolName = namesMap?.get(String(pool.address).toLowerCase())?.name;
+    if (poolName && poolName.trim().length > 0) {
+      baseName = `${baseName} — ${poolName.trim()}`;
+    }
+    // Allow a larger cap now that we include the pool name
+    let nameTag = truncateString(baseName, 90);
 
     // Move all parameter details to Public Note for richer context
     const paramsNote = paramsSnippet && paramsSnippet.trim().length > 0 ? ` Params: ${paramsSnippet}.` : "";
@@ -291,7 +393,8 @@ class TagService implements ITagService {
     // v3: use cursor-based pagination (id_gt) per policy
     let lastId = "0x0000000000000000000000000000000000000000"; // lowest Bytes value
     let prevLastId = "";
-    let allTags: ContractTag[] = [];
+    // Accumulate all pools first so we can enrich with names from the Vaults subgraph
+    const allPools: Pool[] = [];
     // Policy: do not return duplicates for the same chain. Deduplicate early by pool.id
     // (which equals the pool contract address in this subgraph) to avoid building tags
     // for duplicates.
@@ -300,11 +403,15 @@ class TagService implements ITagService {
 
     // Use the validated provided chainId (policy: throw if unsupported)
     const effectiveChainId = String(chainIdNum);
-    const url = prepareUrl(effectiveChainId, apiKey);
+    const poolsUrl = SUBGRAPH_URLS[effectiveChainId]?.pools?.replace("[api-key]", apiKey);
+    const vaultsUrl = SUBGRAPH_URLS[effectiveChainId]?.vaults?.replace("[api-key]", apiKey);
+    if (!poolsUrl || !vaultsUrl) {
+      throw new Error("Missing subgraph URLs for the specified chain.");
+    }
 
     while (isMore) {
       try {
-        const pools = await fetchData(url, lastId);
+        const pools = await fetchData(poolsUrl, lastId);
         const newPools = pools.filter((p) => {
           if (seenPoolIds.has(p.id)) {
             // Policy: skip duplicates identified by pool.id
@@ -313,8 +420,7 @@ class TagService implements ITagService {
           seenPoolIds.add(p.id);
           return true;
         });
-        const pageTags = transformPoolsToTags(effectiveChainId, newPools);
-        allTags.push(...pageTags);
+        allPools.push(...newPools);
 
         isMore = pools.length === 1000;
         if (isMore) {
@@ -338,6 +444,10 @@ class TagService implements ITagService {
         }
       }
     }
+    // Fetch names from the Vaults subgraph and build the lookup map
+    const namesMap = await fetchPoolNamesMap(vaultsUrl);
+    // Now transform pools to tags using the names
+    const allTags = transformPoolsToTags(effectiveChainId, allPools, namesMap);
     return allTags;
   };
 }
