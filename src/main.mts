@@ -346,19 +346,28 @@ function transformPoolsToTags(
     // Build abbreviated, type-specific params
     const paramsSnippet = buildParamsSnippet(pool);
 
-    // Compose name as '<Type> Pool v<version>' and append Pool name from Vaults subgraph if available
-    const versionText = typeof pool.factory.version === "number" ? ` v${pool.factory.version}` : "";
-    let baseName = `${typeText} Pool${versionText}`;
-    const poolName = namesMap?.get(String(pool.address).toLowerCase())?.name;
-    if (poolName && poolName.trim().length > 0) {
-      baseName = `${baseName} — ${poolName.trim()}`;
+    // New policy: Public Name Tag should be '<TokenNames> Pool' only, max 50 chars.
+    const rawPoolName = namesMap?.get(String(pool.address).toLowerCase())?.name?.trim() ?? "";
+    const suffix = " Pool";
+    const maxLen = 50;
+    let tokenPart = rawPoolName;
+    if (tokenPart.length + suffix.length > maxLen) {
+      const allowedTokenLen = Math.max(0, maxLen - suffix.length);
+      // Ensure space for ellipsis within the token name portion
+      if (allowedTokenLen >= 3) {
+        tokenPart = tokenPart.substring(0, allowedTokenLen - 3) + "...";
+      } else {
+        // If extremely constrained, fall back to just 'Pool'
+        tokenPart = "";
+      }
     }
-    // Allow a larger cap now that we include the pool name
-    let nameTag = truncateString(baseName, 90);
+    const nameTag = (tokenPart ? `${tokenPart}${suffix}` : `Pool`);
 
-    // Move all parameter details to Public Note for richer context
+    // Move all detailed info to Public Note
+    const versionText = typeof pool.factory.version === "number" ? ` v${pool.factory.version}` : "";
     const paramsNote = paramsSnippet && paramsSnippet.trim().length > 0 ? ` Params: ${paramsSnippet}.` : "";
-    const publicNote = `A Balancer v3 '${typeText}' pool.${paramsNote}`;
+    const nameNote = rawPoolName ? ` Name: ${rawPoolName}.` : "";
+    const publicNote = `A Balancer v3 '${typeText}' pool${versionText}.${nameNote}${paramsNote}`;
 
     // Note that Balancer v3 does not expose tokens on Pool, so these are not included in the name tag.
     return {
