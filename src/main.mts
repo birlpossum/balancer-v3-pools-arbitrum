@@ -2,7 +2,7 @@ import fetch from "node-fetch";
 import { ContractTag, ITagService } from "atq-types";
 
 // Balancer v3 Pools on Arbitrum only (chainId 42161)
-// Using the official decentralized Subgraph Deployment IDs.
+// Using the official Balancer Subgraphs from https://docs.balancer.fi/data-and-analytics/data-and-analytics/subgraph.html
 // Note: We keep the gateway format that requires an API key, replacing [api-key] at runtime.
 const SUBGRAPH_URLS: Record<string, { pools: string; vaults: string }> = {
   "42161": {
