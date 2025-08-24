@@ -22,8 +22,8 @@ interface FactoryInfo {
   version: number;
 }
 
-// Fetch all pool names from the Vaults subgraph and return a lookup by lowercase address
-async function fetchPoolNamesMap(subgraphUrl: string): Promise<Map<string, { name: string; symbol: string }>> {
+// Fetch all pool names from the Vaults subgraph and return a lookup by lowercase address, using block pinning
+async function fetchPoolNamesMap(subgraphUrl: string, blockNumber: number): Promise<Map<string, { name: string; symbol: string }>> {
   const names = new Map<string, { name: string; symbol: string }>();
   let lastId = "0x0000000000000000000000000000000000000000";
   let isMore = true;
@@ -38,7 +38,7 @@ async function fetchPoolNamesMap(subgraphUrl: string): Promise<Map<string, { nam
         headers,
         body: JSON.stringify({
           query: GET_VAULTS_POOL_NAMES_QUERY,
-          variables: { lastId },
+          variables: { lastId, block: blockNumber },
         }),
         signal: controller.signal,
       } as any);
@@ -115,12 +115,13 @@ const headers: Record<string, string> = {
 
 // v3: cursor-based pagination using id_gt; fetch core identifiers, factory info, and type-specific params
 const GET_POOLS_QUERY = `
-  query GetPools($lastId: ID) {
+  query GetPools($lastId: ID, $block: Int!) {
     pools(
       first: 1000,
       orderBy: id,
       orderDirection: asc,
-      where: { id_gt: $lastId }
+      where: { id_gt: $lastId },
+      block: { number: $block }
     ) {
       id
       address
@@ -154,12 +155,13 @@ interface VaultsGraphQLResponse {
 }
 
 const GET_VAULTS_POOL_NAMES_QUERY = `
-  query GetVaultsPools($lastId: ID) {
+  query GetVaultsPools($lastId: ID, $block: Int!) {
     pools(
       first: 1000,
       orderBy: id,
       orderDirection: asc,
-      where: { id_gt: $lastId }
+      where: { id_gt: $lastId },
+      block: { number: $block }
     ) {
       id
       address
@@ -185,7 +187,8 @@ const camelCaseToSpaced = (input: string): string => {
 
 async function fetchData(
   subgraphUrl: string,
-  lastId: string
+  lastId: string,
+  blockNumber: number
 ): Promise<Pool[]> {
   // Add a reasonable timeout to avoid hanging indefinitely
   const controller = new AbortController();
@@ -197,7 +200,7 @@ async function fetchData(
       headers,
       body: JSON.stringify({
         query: GET_POOLS_QUERY,
-        variables: { lastId },
+        variables: { lastId, block: blockNumber },
       }),
       signal: controller.signal,
     } as any);
@@ -381,6 +384,40 @@ function transformPoolsToTags(
 }
 
 // The main logic for this module
+// Fetch the current indexed block number for a consistent snapshot
+const GET_META_BLOCK_QUERY = `
+  query { _meta { block { number } } }
+`;
+
+async function fetchIndexedBlockNumber(subgraphUrl: string): Promise<number> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30_000);
+  try {
+    const resp = await fetch(subgraphUrl, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ query: GET_META_BLOCK_QUERY }),
+      signal: controller.signal,
+    } as any);
+    if (!resp.ok) {
+      throw new Error(`HTTP error (meta): ${resp.status}`);
+    }
+    const json: any = await resp.json();
+    const blockNumber = json?.data?._meta?.block?.number;
+    if (typeof blockNumber !== "number") {
+      throw new Error("Failed to read _meta.block.number from subgraph response");
+    }
+    return blockNumber;
+  } catch (e: any) {
+    if (e?.name === "AbortError") {
+      throw new Error("Request timed out while querying _meta for block number.");
+    }
+    throw e;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 class TagService implements ITagService {
   // Using an arrow function for returnTags
   returnTags = async (
@@ -418,9 +455,14 @@ class TagService implements ITagService {
       throw new Error("Missing subgraph URLs for the specified chain.");
     }
 
+    // Pin to a consistent snapshot: use the minimum indexed block across both subgraphs
+    const poolsBlock = await fetchIndexedBlockNumber(poolsUrl);
+    const vaultsBlock = await fetchIndexedBlockNumber(vaultsUrl);
+    const blockNumber = Math.min(poolsBlock, vaultsBlock);
+
     while (isMore) {
       try {
-        const pools = await fetchData(poolsUrl, lastId);
+        const pools = await fetchData(poolsUrl, lastId, blockNumber);
         const newPools = pools.filter((p) => {
           if (seenPoolIds.has(p.id)) {
             // Policy: skip duplicates identified by pool.id
@@ -454,7 +496,7 @@ class TagService implements ITagService {
       }
     }
     // Fetch names from the Vaults subgraph and build the lookup map
-    const namesMap = await fetchPoolNamesMap(vaultsUrl);
+    const namesMap = await fetchPoolNamesMap(vaultsUrl, blockNumber);
     // Now transform pools to tags using the names
     const allTags = transformPoolsToTags(effectiveChainId, allPools, namesMap);
     return allTags;
