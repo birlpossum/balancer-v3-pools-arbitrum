@@ -229,22 +229,6 @@ async function fetchData(
   return result.data.pools;
 }
 
-function prepareUrl(chainId: string, apiKey: string): string {
-  // Only Arbitrum (42161) is supported for v3 in this module.
-  const urls = SUBGRAPH_URLS[chainId];
-  if (!urls) {
-    throw new Error(`Unsupported Chain ID: ${chainId}.`);
-  }
-  // Maintain function for backward-compatibility; returns the Pools subgraph URL
-  return urls.pools.replace("[api-key]", encodeURIComponent(apiKey));
-}
-
-function truncateString(text: string, maxLength: number) {
-  if (text.length > maxLength) {
-    return text.substring(0, maxLength - 3) + "..."; // Subtract 3 for the ellipsis
-  }
-  return text;
-}
 function containsHtmlOrMarkdown(text: string): boolean {
   // Enhanced HTML tag detection that requires at least one character inside the brackets
   if (/<[^>]+>/.test(text)) {
